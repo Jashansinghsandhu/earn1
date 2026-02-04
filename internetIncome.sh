@@ -22,6 +22,81 @@ GREEN="\033[0;32m"
 YELLOW="\033[0;33m"
 NOCOLOUR="\033[0m"
 
+##################################################################################
+# ANTI-DETECTION CONFIGURATION FOR EARNAPP                                       #
+# The following functions and variables help prevent container/VPS detection     #
+##################################################################################
+
+# Array of realistic consumer-like device hostnames
+REALISTIC_HOSTNAMES=(
+  "DESKTOP" "LAPTOP" "HOME-PC" "MyComputer" "WORKSTATION"
+  "Office-PC" "Family-PC" "LivingRoom" "Bedroom-PC" "Study-PC"
+  "Gaming-PC" "Media-PC" "Kids-PC" "Den-Computer" "Kitchen-PC"
+)
+
+# Array of realistic consumer Windows-like hostnames
+WINDOWS_STYLE_NAMES=(
+  "DESKTOP" "LAPTOP" "WIN" "HOME" "PC"
+)
+
+# Generate a realistic consumer-style hostname
+generate_realistic_hostname() {
+  local index=$1
+  local base_names=("${WINDOWS_STYLE_NAMES[@]}")
+  local random_index=$((RANDOM % ${#base_names[@]}))
+  local base_name="${base_names[$random_index]}"
+  local random_suffix=$(tr -dc 'A-Z0-9' < /dev/urandom | head -c 7)
+  echo "${base_name}-${random_suffix}"
+}
+
+# Array of common consumer timezones
+CONSUMER_TIMEZONES=(
+  "America/New_York" "America/Chicago" "America/Denver" "America/Los_Angeles"
+  "America/Phoenix" "America/Detroit" "America/Indianapolis" "America/Boise"
+  "America/Anchorage" "Pacific/Honolulu" "Europe/London" "Europe/Paris"
+  "Europe/Berlin" "Europe/Rome" "Europe/Madrid" "Europe/Amsterdam"
+  "Europe/Brussels" "Europe/Vienna" "Europe/Stockholm" "Europe/Oslo"
+  "Europe/Copenhagen" "Europe/Helsinki" "Europe/Warsaw" "Europe/Prague"
+  "Europe/Budapest" "Europe/Athens" "Europe/Bucharest" "Europe/Dublin"
+  "Australia/Sydney" "Australia/Melbourne" "Australia/Brisbane" "Australia/Perth"
+  "Asia/Tokyo" "Asia/Seoul" "Asia/Singapore" "Asia/Hong_Kong"
+)
+
+# Select a random timezone
+get_random_timezone() {
+  local index=$((RANDOM % ${#CONSUMER_TIMEZONES[@]}))
+  echo "${CONSUMER_TIMEZONES[$index]}"
+}
+
+# Generate realistic MAC address (avoiding VPS/VM ranges)
+generate_realistic_mac() {
+  # Use common consumer NIC vendor prefixes (excluding VM/VPS prefixes)
+  local vendor_prefixes=(
+    "00:1A:2B" "00:1B:44" "00:1C:B3" "00:1D:7D" "00:1E:58"  # Intel
+    "00:1F:3C" "00:21:5C" "00:22:68" "00:24:D7" "00:26:18"  # Intel
+    "AC:7B:A1" "B0:25:AA" "B4:B5:2F" "B8:70:F4" "BC:EE:7B"  # Intel
+    "78:2B:CB" "94:65:2D"  # Various consumer
+    "18:66:DA" "20:89:84" "28:6E:D4" "30:9C:23" "38:2C:4A"  # Samsung/LG
+    "44:39:C4" "4C:EB:42" "54:EE:75" "5C:E0:C5" "64:66:B3"  # Realtek
+    "70:4D:7B" "74:D0:2B" "78:24:AF" "7C:5C:F8" "80:CE:62"  # Apple
+    "84:8F:69" "88:53:2E" "8C:85:90" "90:B1:1C" "94:B8:6D"  # Dell/HP
+  )
+  local prefix_index=$((RANDOM % ${#vendor_prefixes[@]}))
+  local prefix="${vendor_prefixes[$prefix_index]}"
+  local suffix=$(printf '%02X:%02X:%02X' $((RANDOM % 256)) $((RANDOM % 256)) $((RANDOM % 256)))
+  echo "${prefix}:${suffix}"
+}
+
+# Build security options to hide container detection
+build_security_opts() {
+  local opts=""
+  # Disable AppArmor to reduce container fingerprinting
+  opts="$opts --security-opt apparmor=unconfined"
+  # Disable seccomp for more authentic system calls
+  opts="$opts --security-opt seccomp=unconfined"
+  echo "$opts"
+}
+
 # File names
 properties_file="properties.conf"
 banner_file="banner.jpg"
@@ -1042,12 +1117,58 @@ start_containers() {
       printf "$date_time https://earnapp.com/r/%s\n" "$uuid" | tee -a $earnapp_file
     fi
 
-    if CONTAINER_ID=$(sudo docker run -d --health-interval=24h --name earnapp$UNIQUE_ID$i $LOGS_PARAM $DNS_VOLUME --restart=always $NETWORK_TUN -v $PWD/$earnapp_data_folder/data$i:/etc/earnapp -e EARNAPP_UUID=$uuid fazalfarhan01/earnapp:lite); then
-      echo "$CONTAINER_ID" | tee -a $containers_file
-      echo "earnapp$UNIQUE_ID$i" | tee -a $container_names_file
+    # Check if anti-detection is enabled (default: true)
+    if [ "$EARNAPP_ANTIDETECT" != "false" ]; then
+      # Generate anti-detection parameters for EarnApp
+      EARNAPP_HOSTNAME=$(generate_realistic_hostname $i)
+      if [[ $CUSTOM_TIMEZONE ]]; then
+        EARNAPP_TIMEZONE=$CUSTOM_TIMEZONE
+      else
+        EARNAPP_TIMEZONE=$(get_random_timezone)
+      fi
+      EARNAPP_MAC=$(generate_realistic_mac)
+      EARNAPP_SECURITY_OPTS=$(build_security_opts)
+      
+      echo -e "${GREEN}Anti-detection enabled for EarnApp:${NOCOLOUR}"
+      echo -e "  Hostname: $EARNAPP_HOSTNAME"
+      echo -e "  Timezone: $EARNAPP_TIMEZONE"
+      echo -e "  MAC Address: $EARNAPP_MAC"
+
+      if CONTAINER_ID=$(sudo docker run -d --health-interval=24h --name earnapp$UNIQUE_ID$i $LOGS_PARAM $DNS_VOLUME --restart=always $NETWORK_TUN \
+        --hostname=$EARNAPP_HOSTNAME \
+        -e TZ=$EARNAPP_TIMEZONE \
+        -e HOSTNAME=$EARNAPP_HOSTNAME \
+        -e LANG=en_US.UTF-8 \
+        -e LC_ALL=en_US.UTF-8 \
+        -e HOME=/root \
+        -e USER=user \
+        -e KUBERNETES_SERVICE_HOST= \
+        -e KUBERNETES_PORT= \
+        -e DOCKER_HOST= \
+        -e container= \
+        $EARNAPP_SECURITY_OPTS \
+        --mac-address=$EARNAPP_MAC \
+        --memory=512m \
+        --cpus=1.0 \
+        -v $PWD/$earnapp_data_folder/data$i:/etc/earnapp \
+        -e EARNAPP_UUID=$uuid \
+        fazalfarhan01/earnapp:lite); then
+        echo "$CONTAINER_ID" | tee -a $containers_file
+        echo "earnapp$UNIQUE_ID$i" | tee -a $container_names_file
+      else
+        echo -e "${RED}Failed to start container for Earnapp. Exiting..${NOCOLOUR}"
+        exit 1
+      fi
     else
-      echo -e "${RED}Failed to start container for Earnapp. Exiting..${NOCOLOUR}"
-      exit 1
+      # Standard container without anti-detection
+      echo -e "${YELLOW}Anti-detection is disabled for EarnApp${NOCOLOUR}"
+      if CONTAINER_ID=$(sudo docker run -d --health-interval=24h --name earnapp$UNIQUE_ID$i $LOGS_PARAM $DNS_VOLUME --restart=always $NETWORK_TUN -v $PWD/$earnapp_data_folder/data$i:/etc/earnapp -e EARNAPP_UUID=$uuid fazalfarhan01/earnapp:lite); then
+        echo "$CONTAINER_ID" | tee -a $containers_file
+        echo "earnapp$UNIQUE_ID$i" | tee -a $container_names_file
+      else
+        echo -e "${RED}Failed to start container for Earnapp. Exiting..${NOCOLOUR}"
+        exit 1
+      fi
     fi
   else
     if [[ "$container_pulled" == false && "$ENABLE_LOGS" == true ]]; then
